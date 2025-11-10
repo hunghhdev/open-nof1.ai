@@ -19,6 +19,7 @@ interface Trading {
   leverage?: number | null;
   amount?: number | null;
   pricing?: number | null;
+  percentage?: number | null;
   stopLoss?: number | null;
   takeProfit?: number | null;
   createdAt: string;
@@ -153,6 +154,18 @@ export function ModelsView() {
                     <div className="font-mono font-semibold">
                       {trade.amount}{" "}
                       {trade.symbol?.includes("/") ? "units" : trade.symbol}
+                    </div>
+                  </div>
+                )}
+
+                {/* Percentage (for Sell) */}
+                {trade.opeartion === "Sell" && trade.percentage && (
+                  <div className="space-y-1">
+                    <div className="text-xs text-muted-foreground font-medium">
+                      % to Sell
+                    </div>
+                    <div className="font-mono font-semibold text-orange-600">
+                      {trade.percentage}%
                     </div>
                   </div>
                 )}
@@ -367,6 +380,16 @@ export function ModelsView() {
                                   </span>
                                   <span className="font-mono font-semibold">
                                     {decision.amount}
+                                  </span>
+                                </div>
+                              )}
+                              {decision.opeartion === "Sell" && decision.percentage && (
+                                <div className="flex justify-between items-center">
+                                  <span className="text-muted-foreground">
+                                    % to Sell:
+                                  </span>
+                                  <span className="font-mono font-semibold text-orange-600">
+                                    {decision.percentage}%
                                   </span>
                                 </div>
                               )}
