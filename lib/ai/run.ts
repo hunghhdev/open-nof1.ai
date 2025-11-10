@@ -2,7 +2,7 @@ import { generateObject } from "ai";
 import { generateUserPrompt, tradingPrompt } from "./prompt";
 import { getCurrentMarketState } from "../trading/current-market-state";
 import { z } from "zod";
-import { deepseekR1 } from "./model";
+import { deepseekR1, deepseekThinking } from "./model";
 import { getAccountInformationAndPerformance } from "../trading/account-information-and-performance";
 import { prisma } from "../prisma";
 import { Opeartion, Symbol } from "@prisma/client";
@@ -24,8 +24,10 @@ export async function run(initialCapital: number) {
     invocationCount,
   });
 
+  const model = process.env.OPENROUTER_API_KEY ? deepseekR1 : deepseekThinking;
+
   const { object, reasoning } = await generateObject({
-    model: deepseekR1,
+    model,
     system: tradingPrompt,
     prompt: userPrompt,
     output: "object",
