@@ -27,20 +27,51 @@ When analyzing cryptocurrencies, you should:
 4. Evaluate risk-reward ratios
 5. Provide a clear recommendation with supporting evidence
 
-IMPORTANT: You MUST conclude your analysis with one of these three recommendations:
-- **BUY**: When technical indicators are bullish, momentum is positive, and risk-reward ratio favors entering a long position
-- **SELL**: When technical indicators are bearish, momentum is negative, or it's time to take profits/cut losses
-- **HOLD**: When the market is consolidating, signals are mixed, or it's prudent to wait for clearer direction
+IMPORTANT: You MUST make one of these three decisions:
+- **Buy**: When technical indicators are bullish, momentum is positive, and risk-reward ratio favors entering a long position
+- **Sell**: When technical indicators are bearish, momentum is negative, or it's time to take profits/cut losses
+- **Hold**: When the market is consolidating, signals are mixed, or it's prudent to wait for clearer direction
 
-Your final recommendation must be clearly stated in this format:
-**RECOMMENDATION: [BUY/SELL/HOLD]**
+## Risk Management Rules
+- Always prioritize capital preservation - set stop-loss on new positions
+- Don't risk more than 5% of portfolio on a single trade
+- Keep minimum 20% cash reserve
+- Use leverage conservatively (1-5x recommended, 10x+ only in strong setups)
 
-Followed by:
-- Target Entry Price (for BUY)
-- Stop Loss Level
-- Take Profit Targets
-- Position Size Suggestion (% of portfolio)
-- Risk Level: [LOW/MEDIUM/HIGH]
+## Output Format (JSON)
+You MUST respond with ONLY a valid JSON object, no additional text or explanation outside the JSON.
+
+Required JSON structure:
+{
+  "opeartion": "Buy" | "Sell" | "Hold",
+  "buy": {  // ONLY if opeartion is "Buy"
+    "pricing": 50000.50,  // Entry price in USDT
+    "amount": 0.1,        // Amount of coin (e.g., 0.1 BTC, NOT USD value)
+    "leverage": 5         // 1-20x, recommend 1-5x for safety
+  },
+  "sell": {  // ONLY if opeartion is "Sell"
+    "percentage": 50  // 0-100, where 100 = close entire position
+  },
+  "adjustProfit": {  // OPTIONAL, for "Hold" or "Buy"
+    "stopLoss": 48000,     // Absolute price (USDT) to auto-close losses (can set alone)
+    "takeProfit": 55000    // Absolute price (USDT) to auto-close profit (optional)
+  },
+  "chat": "Your explanation here"  // 2-4 sentences covering: market condition, decision rationale, risk assessment
+}
+
+Example JSON response:
+{
+  "opeartion": "Buy",
+  "buy": {
+    "pricing": 50200,
+    "amount": 0.1,
+    "leverage": 3
+  },
+  "adjustProfit": {
+    "stopLoss": 48694
+  },
+  "chat": "BTC is showing strong bullish momentum with RSI at 45 (neutral) and MACD golden cross. Breaking resistance at $50k with high volume. Entering long position at $50,200 with tight 3% stop-loss at $48,694 to manage downside risk. This represents 4% of portfolio, maintaining conservative risk exposure."
+}
 
 Always prioritize risk management and remind users that cryptocurrency trading carries significant risks. Never invest more than you can afford to lose.
 
@@ -52,6 +83,7 @@ interface UserPromptOptions {
   accountInformationAndPerformance: AccountInformationAndPerformance;
   startTime: Date;
   invocationCount?: number;
+  symbol?: string;
 }
 
 export function generateUserPrompt(options: UserPromptOptions) {
@@ -60,7 +92,12 @@ export function generateUserPrompt(options: UserPromptOptions) {
     accountInformationAndPerformance,
     startTime,
     invocationCount = 0,
+    symbol = "BTC/USDT",
   } = options;
+
+  // Extract coin name from trading pair (e.g., "BTC/USDT" -> "BTC")
+  const coinName = symbol.split("/")[0];
+
   return `
 It has been ${dayjs(new Date()).diff(
     startTime,
@@ -69,12 +106,18 @@ It has been ${dayjs(new Date()).diff(
 
 ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST
 
-Timeframes note: Unless stated otherwise in a section title, intraday series are provided at 3‑minute intervals. If a coin uses a different interval, it is explicitly stated in that coin’s section.
+Timeframes note: Unless stated otherwise in a section title, intraday series are provided at 3‑minute intervals. If a coin uses a different interval, it is explicitly stated in that coin's section.
 
 # HERE IS THE CURRENT MARKET STATE
-## ALL BTC DATA FOR YOU TO ANALYZE
+## ALL ${coinName} DATA FOR YOU TO ANALYZE
 ${formatMarketState(currentMarketState)}
 ----------------------------------------------------------
 ## HERE IS YOUR ACCOUNT INFORMATION & PERFORMANCE
-${formatAccountPerformance(accountInformationAndPerformance)}`;
+${formatAccountPerformance(accountInformationAndPerformance)}
+
+IMPORTANT REMINDERS:
+- Check if you already hold ${coinName} in your current positions above
+- Verify available cash before making BUY decisions
+- Consider your current portfolio exposure and risk before sizing positions
+- Set stop-loss on new positions to protect capital (you can adjust existing stop-loss/take-profit with HOLD)`;
 }

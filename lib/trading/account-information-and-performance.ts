@@ -49,8 +49,7 @@ export function formatAccountPerformance(
   const { currentTotalReturn, availableCash, totalCashValue, positions } =
     accountPerformance;
 
-  const output = `## HERE IS YOUR ACCOUNT INFORMATION & PERFORMANCE
-Current Total Return (percent): ${currentTotalReturn * 100}%
+  const output = `Current Total Return (percent): ${currentTotalReturn * 100}%
 Available Cash: ${availableCash}
 Current Account Value: ${totalCashValue}
 Positions: ${positions

@@ -7,136 +7,151 @@ import { getAccountInformationAndPerformance } from "../trading/account-informat
 import { prisma } from "../prisma";
 import { Opeartion, Symbol } from "@prisma/client";
 
+// Suppress AI SDK warnings - models work fine via tool calling despite warning
+if (typeof globalThis !== "undefined") {
+  (globalThis as any).AI_SDK_LOG_WARNINGS = false;
+}
+
+/**
+ * Maps trading pair strings to Symbol enum
+ */
+function mapSymbol(tradingPair: string): Symbol {
+  const symbol = tradingPair.split("/")[0].toUpperCase();
+  if (symbol in Symbol) {
+    return Symbol[symbol as keyof typeof Symbol];
+  }
+  throw new Error(`Unsupported symbol: ${symbol}`);
+}
+
 /**
  * you can interval trading using cron job
  */
 export async function run(initialCapital: number) {
-  const currentMarketState = await getCurrentMarketState("BTC/USDT");
+  // Read trading symbols from environment variable, default to BTC/USDT
+  const tradingSymbolsEnv = process.env.TRADING_SYMBOLS || "BTC/USDT";
+  const tradingSymbols = tradingSymbolsEnv.split(",").map((s) => s.trim());
+
   const accountInformationAndPerformance =
     await getAccountInformationAndPerformance(initialCapital);
   // Count previous Chat entries to provide an invocation counter in the prompt
   const invocationCount = await prisma.chat.count();
 
-  const userPrompt = generateUserPrompt({
-    currentMarketState,
-    accountInformationAndPerformance,
-    startTime: new Date(),
-    invocationCount,
-  });
+  // Process each trading symbol
+  for (const tradingPair of tradingSymbols) {
+    const currentMarketState = await getCurrentMarketState(tradingPair);
+    const symbolEnum = mapSymbol(tradingPair);
 
-  const model = process.env.OPENROUTER_API_KEY ? deepseekR1 : deepseekThinking;
+    const userPrompt = generateUserPrompt({
+      currentMarketState,
+      accountInformationAndPerformance,
+      startTime: new Date(),
+      invocationCount,
+      symbol: tradingPair,
+    });
 
-  const { object, reasoning } = await generateObject({
-    model,
-    system: tradingPrompt,
-    prompt: userPrompt,
-    output: "object",
-    mode: "json",
-    schema: z.object({
-      opeartion: z.nativeEnum(Opeartion),
-      buy: z
-        .object({
-          pricing: z.number().describe("The pricing of you want to buy in."),
-          amount: z.number(),
-          leverage: z.number().min(1).max(20),
-        })
-        .optional()
-        .describe("If opeartion is buy, generate object"),
-      sell: z
-        .object({
-          percentage: z
-            .number()
-            .min(0)
-            .max(100)
-            .describe("Percentage of position to sell"),
-        })
-        .optional()
-        .describe("If opeartion is sell, generate object"),
-      adjustProfit: z
-        .object({
-          stopLoss: z
-            .number()
-            .optional()
-            .describe("The stop loss of you want to set."),
-          takeProfit: z
-            .number()
-            .optional()
-            .describe("The take profit of you want to set."),
-        })
-        .optional()
-        .describe(
-          "If opeartion is hold and you want to adjust the profit, generate object"
-        ),
-      chat: z
-        .string()
-        .describe(
-          "The reason why you do this opeartion, and tell me your anlyaise, for example: Currently holding all my positions in ETH, SOL, XRP, BTC, DOGE, and BNB as none of my invalidation conditions have been triggered, though XRP and BNB are showing slight unrealized losses. My overall account is up 10.51% with $4927.64 in cash, so I'll continue to monitor my existing trades."
-        ),
-    }),
-  });
+    const model = process.env.OPENROUTER_API_KEY
+      ? deepseekR1
+      : deepseekThinking;
 
-  if (object.opeartion === Opeartion.Buy) {
-    await prisma.chat.create({
-      data: {
-        reasoning: reasoning || "<no reasoning>",
-        chat: object.chat || "<no chat>",
-        userPrompt,
-        tradings: {
-          createMany: {
-            data: {
-              symbol: Symbol.BTC,
-              opeartion: object.opeartion,
-              pricing: object.buy?.pricing,
-              amount: object.buy?.amount,
-              leverage: object.buy?.leverage,
+    const { object, reasoning } = await generateObject({
+      model,
+      system: tradingPrompt,
+      prompt: userPrompt,
+      schema: z.object({
+        opeartion: z.nativeEnum(Opeartion),
+        buy: z
+          .object({
+            pricing: z.number(),
+            amount: z.number(),
+            leverage: z.number().min(1).max(20),
+          })
+          .optional(),
+        sell: z
+          .object({
+            percentage: z.number().min(0).max(100),
+          })
+          .optional(),
+        adjustProfit: z
+          .object({
+            stopLoss: z.number().optional(),
+            takeProfit: z.number().optional(),
+          })
+          .optional(),
+        chat: z.string(),
+      }),
+    });
+
+    if (object.opeartion === Opeartion.Buy) {
+      // Validation: Buy operation must have buy object
+      if (!object.buy) {
+        console.error(`[${tradingPair}] Buy operation missing buy object`);
+        continue;
+      }
+
+      await prisma.chat.create({
+        data: {
+          reasoning: reasoning || "<no reasoning>",
+          chat: object.chat || "<no chat>",
+          userPrompt,
+          tradings: {
+            createMany: {
+              data: {
+                symbol: symbolEnum,
+                opeartion: object.opeartion,
+                pricing: object.buy.pricing,
+                amount: object.buy.amount,
+                leverage: object.buy.leverage,
+              },
             },
           },
         },
-      },
-    });
-  }
+      });
+    }
 
-  if (object.opeartion === Opeartion.Sell) {
-    await prisma.chat.create({
-      data: {
-        reasoning: reasoning || "<no reasoning>",
-        chat: object.chat || "<no chat>",
-        userPrompt,
-        tradings: {
-          createMany: {
-            data: {
-              symbol: Symbol.BTC,
-              opeartion: object.opeartion,
+    if (object.opeartion === Opeartion.Sell) {
+      // Validation: Sell operation must have sell object
+      if (!object.sell) {
+        console.error(`[${tradingPair}] Sell operation missing sell object`);
+        continue;
+      }
+
+      await prisma.chat.create({
+        data: {
+          reasoning: reasoning || "<no reasoning>",
+          chat: object.chat || "<no chat>",
+          userPrompt,
+          tradings: {
+            createMany: {
+              data: {
+                symbol: symbolEnum,
+                opeartion: object.opeartion,
+                percentage: object.sell.percentage,
+              },
             },
           },
         },
-      },
-    });
-  }
+      });
+    }
 
-  if (object.opeartion === Opeartion.Hold) {
-    const shouldAdjustProfit =
-      object.adjustProfit?.stopLoss && object.adjustProfit?.takeProfit;
-    await prisma.chat.create({
-      data: {
-        reasoning: reasoning || "<no reasoning>",
-        chat: object.chat || "<no chat>",
-        userPrompt,
-        tradings: {
-          createMany: {
-            data: {
-              symbol: Symbol.BTC,
-              opeartion: object.opeartion,
-              stopLoss: shouldAdjustProfit
-                ? object.adjustProfit?.stopLoss
-                : undefined,
-              takeProfit: shouldAdjustProfit
-                ? object.adjustProfit?.takeProfit
-                : undefined,
+    if (object.opeartion === Opeartion.Hold) {
+      // Allow individual adjustment of stopLoss or takeProfit (capital preservation priority)
+      await prisma.chat.create({
+        data: {
+          reasoning: reasoning || "<no reasoning>",
+          chat: object.chat || "<no chat>",
+          userPrompt,
+          tradings: {
+            createMany: {
+              data: {
+                symbol: symbolEnum,
+                opeartion: object.opeartion,
+                stopLoss: object.adjustProfit?.stopLoss,
+                takeProfit: object.adjustProfit?.takeProfit,
+              },
             },
           },
         },
-      },
-    });
+      });
+    }
   }
 }

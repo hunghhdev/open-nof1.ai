@@ -40,11 +40,12 @@ model Trading {
 
   symbol     Symbol
   opeartion  Opeartion
-  leverage   Int?
-  amount     Int?
-  pricing    Int?
-  stopLoss   Int?
-  takeProfit Int?
+  leverage   Float?
+  amount     Float?
+  pricing    Float?
+  percentage Float?
+  stopLoss   Float?
+  takeProfit Float?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
