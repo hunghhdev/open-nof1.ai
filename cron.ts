@@ -2,22 +2,26 @@ import cron from "node-cron";
 import jwt from "jsonwebtoken";
 
 const runMetricsInterval = async () => {
-  console.log("Running task 20 seconds metrics interval");
-  const token = jwt.sign(
-    {
-      sub: "cron-token",
-    },
-    process.env.CRON_SECRET_KEY || ""
-  );
+  try {
+    console.log("Running task 20 seconds metrics interval");
+    const token = jwt.sign(
+      {
+        sub: "cron-token",
+      },
+      process.env.CRON_SECRET_KEY || ""
+    );
 
-  await fetch(
-    `${process.env.NEXT_PUBLIC_URL}/api/cron/20-seconds-metrics-interval?token=${token}`,
-    {
-      method: "GET",
-    }
-  );
+    await fetch(
+      `${process.env.NEXT_PUBLIC_URL}/api/cron/20-seconds-metrics-interval?token=${token}`,
+      {
+        method: "GET",
+      }
+    );
 
-  console.log("20 seconds metrics interval executed");
+    console.log("20 seconds metrics interval executed");
+  } catch (error) {
+    console.error("Failed to run 20 seconds metrics interval", error);
+  }
 };
 
 // every 20 seconds
@@ -26,20 +30,24 @@ cron.schedule("*/10 * * * * *", async () => {
 });
 
 const runChatInterval = async () => {
-  console.log("Running task every 3 minutes");
-  const token = jwt.sign(
-    {
-      sub: "cron-token",
-    },
-    process.env.CRON_SECRET_KEY || ""
-  );
+  try {
+    console.log("Running task every 3 minutes");
+    const token = jwt.sign(
+      {
+        sub: "cron-token",
+      },
+      process.env.CRON_SECRET_KEY || ""
+    );
 
-  await fetch(
-    `${process.env.NEXT_PUBLIC_URL}/api/cron/3-minutes-run-interval?token=${token}`,
-    {
-      method: "GET",
-    }
-  );
+    await fetch(
+      `${process.env.NEXT_PUBLIC_URL}/api/cron/3-minutes-run-interval?token=${token}`,
+      {
+        method: "GET",
+      }
+    );
+  } catch (error) {
+    console.error("Failed to run 3 minutes chat interval", error);
+  }
 };
 
 // every 3 minutes
