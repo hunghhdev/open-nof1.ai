@@ -12,10 +12,10 @@ import { ChevronDown, TrendingUp, TrendingDown, Minus } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-interface Trading {
+interface Trade {
   id: string;
   symbol: string;
-  opeartion: "Buy" | "Sell" | "Hold";
+  operation: "Buy" | "Sell" | "Hold";
   leverage?: number | null;
   amount?: number | null;
   pricing?: number | null;
@@ -31,9 +31,33 @@ interface Chat {
   chat: string;
   reasoning: string;
   userPrompt: string;
-  tradings: Trading[];
+  trades: Trade[];
   createdAt: string;
   updatedAt: string;
+}
+
+interface Position {
+  symbol: string;
+  contracts: number;
+  entryPrice: number;
+  markPrice: number;
+  liquidationPrice: number;
+  unrealizedPnl: number;
+  leverage: number;
+  notional: number;
+  side: "long" | "short";
+  stopLossPrice: number | null;
+  takeProfitPrice: number | null;
+}
+
+interface PositionsData {
+  data: Position[];
+  summary: {
+    totalPositions: number;
+    totalValue: number;
+    availableCash: number;
+    totalReturn: number;
+  };
 }
 
 type TabType = "completed-trades" | "model-chat" | "positions";
@@ -41,7 +65,9 @@ type TabType = "completed-trades" | "model-chat" | "positions";
 export function ModelsView() {
   const [activeTab, setActiveTab] = useState<TabType>("model-chat");
   const [chats, setChats] = useState<Chat[]>([]);
+  const [positions, setPositions] = useState<PositionsData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [positionsLoading, setPositionsLoading] = useState(true);
   const [expandedChatId, setExpandedChatId] = useState<string | null>(null);
 
   const fetchChats = useCallback(async () => {
@@ -58,16 +84,35 @@ export function ModelsView() {
     }
   }, []);
 
+  const fetchPositions = useCallback(async () => {
+    try {
+      const response = await fetch("/api/positions");
+      if (!response.ok) return;
+
+      const data = await response.json();
+      setPositions(data);
+      setPositionsLoading(false);
+    } catch (err) {
+      console.error("Error fetching positions:", err);
+      setPositionsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchChats();
-    const interval = setInterval(fetchChats, 30000);
-    return () => clearInterval(interval);
-  }, [fetchChats]);
+    fetchPositions();
+    const chatsInterval = setInterval(fetchChats, 30000);
+    const positionsInterval = setInterval(fetchPositions, 30000);
+    return () => {
+      clearInterval(chatsInterval);
+      clearInterval(positionsInterval);
+    };
+  }, [fetchChats, fetchPositions]);
 
   // 只获取 Buy 和 Sell 操作的交易
   const completedTrades = chats.flatMap((chat) =>
-    chat.tradings
-      .filter((t) => t.opeartion === "Buy" || t.opeartion === "Sell")
+    chat.trades
+      .filter((t) => t.operation === "Buy" || t.operation === "Sell")
       .map((t) => ({ ...t, chatId: chat.id, model: chat.model }))
   );
 
@@ -109,9 +154,9 @@ export function ModelsView() {
               {/* Header with operation */}
               <div className="flex items-center justify-between mb-3 pb-3 border-b">
                 <div className="flex items-center gap-2">
-                  {renderOperationIcon(trade.opeartion)}
+                  {renderOperationIcon(trade.operation)}
                   <span className="font-bold text-base">
-                    {trade.opeartion.toUpperCase()}
+                    {trade.operation.toUpperCase()}
                   </span>
                   <span className="font-mono font-bold text-base">
                     {trade.symbol}
@@ -133,7 +178,7 @@ export function ModelsView() {
                 {trade.pricing && (
                   <div className="space-y-1">
                     <div className="text-xs text-muted-foreground font-medium">
-                      {trade.opeartion === "Buy" ? "Entry Price" : "Exit Price"}
+                      {trade.operation === "Buy" ? "Entry Price" : "Exit Price"}
                     </div>
                     <div className="font-mono font-bold text-base">
                       $
@@ -159,7 +204,7 @@ export function ModelsView() {
                 )}
 
                 {/* Percentage (for Sell) */}
-                {trade.opeartion === "Sell" && trade.percentage && (
+                {trade.operation === "Sell" && trade.percentage && (
                   <div className="space-y-1">
                     <div className="text-xs text-muted-foreground font-medium">
                       % to Sell
@@ -259,7 +304,7 @@ export function ModelsView() {
       <div className="space-y-4">
         {chats.map((chat) => {
           const isExpanded = expandedChatId === chat.id;
-          const decisions = chat.tradings;
+          const decisions = chat.trades;
 
           return (
             <Card key={chat.id} className="overflow-hidden max-w-[600px]">
@@ -339,18 +384,18 @@ export function ModelsView() {
                           <div
                             key={idx}
                             className={`rounded-lg p-3 border-l-4 ${
-                              decision.opeartion === "Buy"
+                              decision.operation === "Buy"
                                 ? "bg-green-50 dark:bg-green-950/20 border-green-500"
-                                : decision.opeartion === "Sell"
+                                : decision.operation === "Sell"
                                 ? "bg-red-50 dark:bg-red-950/20 border-red-500"
                                 : "bg-yellow-50 dark:bg-yellow-950/20 border-yellow-500"
                             }`}
                           >
                             {/* Decision header */}
                             <div className="flex items-center gap-2 mb-2">
-                              {renderOperationIcon(decision.opeartion)}
+                              {renderOperationIcon(decision.operation)}
                               <span className="font-bold text-sm">
-                                {decision.opeartion.toUpperCase()}
+                                {decision.operation.toUpperCase()}
                               </span>
                               <span className="font-mono font-bold text-sm">
                                 {decision.symbol}
@@ -362,9 +407,9 @@ export function ModelsView() {
                               {decision.pricing && (
                                 <div className="flex justify-between items-center">
                                   <span className="text-muted-foreground">
-                                    {decision.opeartion === "Buy"
+                                    {decision.operation === "Buy"
                                       ? "Entry Price:"
-                                      : decision.opeartion === "Sell"
+                                      : decision.operation === "Sell"
                                       ? "Exit Price:"
                                       : "Current Price:"}
                                   </span>
@@ -383,7 +428,7 @@ export function ModelsView() {
                                   </span>
                                 </div>
                               )}
-                              {decision.opeartion === "Sell" && decision.percentage && (
+                              {decision.operation === "Sell" && decision.percentage && (
                                 <div className="flex justify-between items-center">
                                   <span className="text-muted-foreground">
                                     % to Sell:
@@ -468,6 +513,203 @@ export function ModelsView() {
     );
   };
 
+  const renderPositions = () => {
+    if (positionsLoading) {
+      return (
+        <div className="text-center py-8 text-sm">Loading positions...</div>
+      );
+    }
+
+    if (!positions || positions.data.length === 0) {
+      return (
+        <div className="text-center py-8 text-muted-foreground text-sm">
+          No active positions
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-3">
+        {/* Summary Card */}
+        {positions.summary && (
+          <Card className="bg-muted/30">
+            <CardContent className="p-3">
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <div className="text-muted-foreground mb-1">
+                    Total Positions
+                  </div>
+                  <div className="font-semibold">
+                    {positions.summary.totalPositions}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground mb-1">
+                    Available Cash
+                  </div>
+                  <div className="font-semibold font-mono">
+                    ${positions.summary.availableCash.toFixed(2)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground mb-1">
+                    Position Value
+                  </div>
+                  <div className="font-semibold font-mono">
+                    ${positions.summary.totalValue.toFixed(2)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground mb-1">Total Return</div>
+                  <div
+                    className={`font-semibold font-mono ${
+                      positions.summary.totalReturn >= 0
+                        ? "text-green-500"
+                        : "text-red-500"
+                    }`}
+                  >
+                    {(positions.summary.totalReturn * 100).toFixed(2)}%
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Positions List */}
+        {positions.data.map((position, index) => {
+          const pnlPercent =
+            ((position.markPrice - position.entryPrice) /
+              position.entryPrice) *
+            100;
+          const isProfitable = position.unrealizedPnl >= 0;
+          const slDistance = position.stopLossPrice
+            ? ((position.stopLossPrice - position.entryPrice) /
+                position.entryPrice) *
+              100
+            : null;
+          const tpDistance = position.takeProfitPrice
+            ? ((position.takeProfitPrice - position.entryPrice) /
+                position.entryPrice) *
+              100
+            : null;
+
+          return (
+            <Card key={index} className="overflow-hidden">
+              <CardContent className="p-4">
+                {/* Header */}
+                <div className="flex justify-between items-start mb-3">
+                  <div>
+                    <div className="font-semibold text-base">
+                      {position.symbol}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {position.side.toUpperCase()} {position.leverage}x
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div
+                      className={`text-sm font-bold ${
+                        isProfitable ? "text-green-500" : "text-red-500"
+                      }`}
+                    >
+                      {isProfitable ? "+" : ""}$
+                      {position.unrealizedPnl.toFixed(2)}
+                    </div>
+                    <div
+                      className={`text-xs ${
+                        isProfitable ? "text-green-500" : "text-red-500"
+                      }`}
+                    >
+                      {pnlPercent >= 0 ? "+" : ""}
+                      {pnlPercent.toFixed(2)}%
+                    </div>
+                  </div>
+                </div>
+
+                {/* Price Info */}
+                <div className="space-y-2 mb-3 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Entry:</span>
+                    <span className="font-mono font-semibold">
+                      ${position.entryPrice.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Current:</span>
+                    <span className="font-mono font-semibold">
+                      ${position.markPrice.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Stop Loss & Take Profit */}
+                <div className="space-y-2 mb-3 text-xs border-t pt-2">
+                  {position.stopLossPrice && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-muted-foreground">Stop Loss:</span>
+                      <div className="text-right">
+                        <div className="font-mono font-semibold text-red-500">
+                          ${position.stopLossPrice.toLocaleString()}
+                        </div>
+                        {slDistance !== null && (
+                          <div className="text-red-500">
+                            {slDistance.toFixed(2)}%
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {position.takeProfitPrice && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-muted-foreground">
+                        Take Profit:
+                      </span>
+                      <div className="text-right">
+                        <div className="font-mono font-semibold text-green-500">
+                          ${position.takeProfitPrice.toLocaleString()}
+                        </div>
+                        {tpDistance !== null && (
+                          <div className="text-green-500">
+                            +{tpDistance.toFixed(2)}%
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Position Details */}
+                <div className="grid grid-cols-2 gap-2 text-xs border-t pt-2">
+                  <div>
+                    <div className="text-muted-foreground">Size</div>
+                    <div className="font-mono">
+                      {position.contracts} {position.symbol.split("/")[0]}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">Notional</div>
+                    <div className="font-mono">
+                      ${position.notional.toFixed(2)}
+                    </div>
+                  </div>
+                  {position.liquidationPrice && (
+                    <div className="col-span-2">
+                      <div className="text-muted-foreground">Liquidation</div>
+                      <div className="font-mono text-red-400">
+                        ${position.liquidationPrice.toLocaleString()}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <Card className="h-full flex flex-col overflow-hidden">
       <CardHeader className="pb-3 flex-shrink-0">
@@ -515,11 +757,7 @@ export function ModelsView() {
         <div className="flex-1 overflow-y-auto min-h-0 -mx-4 px-4">
           {activeTab === "model-chat" && renderModelChat()}
           {activeTab === "completed-trades" && renderCompletedTrades()}
-          {activeTab === "positions" && (
-            <div className="text-center py-8 text-muted-foreground text-sm">
-              Positions view coming soon...
-            </div>
-          )}
+          {activeTab === "positions" && renderPositions()}
         </div>
       </CardContent>
     </Card>

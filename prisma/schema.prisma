@@ -1,5 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Prisma schema for N-of-1 Trading Bot
+// Clean schema with execution tracking
 
 generator client {
   provider = "prisma-client-js"
@@ -10,55 +10,9 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model Metrics {
-  id String @id @default(uuid())
-
-  name  String
-  model ModelType
-
-  metrics Json[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model Chat {
-  id String @id @default(uuid())
-
-  model      ModelType @default(Deepseek)
-  chat       String    @default("<no chat>")
-  reasoning  String
-  userPrompt String
-  tradings   Trading[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model Trading {
-  id String @id @default(uuid())
-
-  symbol     Symbol
-  opeartion  Opeartion
-  leverage   Float?
-  amount     Float?
-  pricing    Float?
-  percentage Float?
-  stopLoss   Float?
-  takeProfit Float?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  Chat   Chat?   @relation(fields: [chatId], references: [id], onDelete: Cascade)
-  chatId String?
-}
-
-enum Opeartion {
-  Buy
-  Sell
-  Hold
-}
+// ============================================
+// ENUMS
+// ============================================
 
 enum Symbol {
   BTC
@@ -68,9 +22,141 @@ enum Symbol {
   DOGE
 }
 
+enum Operation {
+  Buy
+  Sell
+  Hold
+}
+
+enum ExecutionStatus {
+  PENDING     // AI decision made, waiting to execute
+  EXECUTING   // Sending order to Binance
+  FILLED      // Order filled successfully
+  PARTIAL     // Partially filled (for future use)
+  FAILED      // Execution failed
+  CANCELED    // Canceled before execution
+}
+
+enum PositionStatus {
+  OPEN        // Position currently active
+  CLOSED      // Position closed (sold)
+  LIQUIDATED  // Position liquidated
+}
+
 enum ModelType {
   Deepseek
   DeepseekThinking
   Qwen
   Doubao
+}
+
+// ============================================
+// MODELS
+// ============================================
+
+// AI Chat/Reasoning records
+model Chat {
+  id         String   @id @default(uuid())
+  model      ModelType @default(Deepseek)
+  chat       String   @default("<no chat>")
+  reasoning  String
+  userPrompt String   @db.Text
+
+  trades     Trade[]
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([createdAt])
+}
+
+// Trade execution records (Buy/Sell/Hold decisions)
+model Trade {
+  id         String   @id @default(uuid())
+
+  // AI Decision
+  symbol     Symbol
+  operation  Operation
+
+  // Order Details (from AI)
+  pricing    Float?   // AI suggested entry price
+  amount     Float?   // Coin amount (e.g., 0.1 BTC)
+  leverage   Float?   // 1-20x
+  percentage Float?   // For Sell: 0-100
+  stopLoss   Float?   // Absolute USDT price
+  takeProfit Float?   // Absolute USDT price
+
+  // Execution Tracking
+  status          ExecutionStatus @default(PENDING)
+  binanceOrderId  String?         // Binance order ID
+  executedPrice   Float?          // Actual fill price
+  executedAmount  Float?          // Actual filled amount
+  executedAt      DateTime?       // When order filled
+  error           String?         // Error message if failed
+
+  // Position Linking
+  positionId      String?         // Link Buy ↔ Sell same position
+  position        Position?       @relation(fields: [positionId], references: [id])
+
+  // Relation
+  chatId     String?
+  chat       Chat?    @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([symbol, createdAt])
+  @@index([status])
+  @@index([positionId])
+}
+
+// Position lifecycle tracking (OPEN → CLOSED)
+model Position {
+  id             String         @id @default(uuid())
+
+  symbol         Symbol
+  status         PositionStatus @default(OPEN)
+
+  // Entry Info
+  entryPrice     Float
+  entryAmount    Float
+  entryLeverage  Float
+  entryOrderId   String?        // Binance order ID for entry
+
+  // Current Stop Loss / Take Profit
+  currentStopLoss   Float?
+  currentTakeProfit Float?
+
+  // Exit Info (when closed)
+  exitPrice      Float?
+  exitAmount     Float?
+  exitOrderId    String?
+  exitReason     String?        // "TAKE_PROFIT", "STOP_LOSS", "MANUAL", "LIQUIDATED"
+
+  // P&L
+  realizedPnl    Float?         // Profit/Loss when closed
+
+  // Linking to trades
+  trades         Trade[]
+
+  openedAt       DateTime       @default(now())
+  closedAt       DateTime?
+  updatedAt      DateTime       @updatedAt
+
+  @@index([symbol, status])
+  @@index([status])
+}
+
+// Performance metrics tracking
+model Metrics {
+  id         String     @id @default(uuid())
+
+  name       String
+  model      ModelType
+  metrics    Json[]     // Time-series performance data
+
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@index([model])
 }
