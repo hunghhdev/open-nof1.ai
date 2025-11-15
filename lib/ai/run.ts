@@ -7,6 +7,8 @@ import { getAccountInformationAndPerformance } from "../trading/account-informat
 import { prisma } from "../prisma";
 import { Opeartion, Symbol } from "@prisma/client";
 
+const opeartionValues = Object.values(Opeartion) as [string, ...string[]];
+
 // Suppress AI SDK warnings - models work fine via tool calling despite warning
 if (typeof globalThis !== "undefined") {
   (globalThis as any).AI_SDK_LOG_WARNINGS = false;
@@ -58,7 +60,7 @@ export async function run(initialCapital: number) {
       system: tradingPrompt,
       prompt: userPrompt,
       schema: z.object({
-        opeartion: z.nativeEnum(Opeartion),
+        opeartion: z.enum(opeartionValues),
         buy: z
           .object({
             pricing: z.number(),
