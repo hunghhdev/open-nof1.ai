@@ -12,7 +12,7 @@ export const GET = async (request: NextRequest) => {
       createdAt: "desc",
     },
     include: {
-      tradings: {
+      trades: {
         take: 10,
         orderBy: {
           createdAt: "desc",
