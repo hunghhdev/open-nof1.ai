@@ -13,7 +13,7 @@ export const GET = async (request: NextRequest) => {
 
   try {
     jwt.verify(token, process.env.CRON_SECRET_KEY || "");
-  } catch (error) {
+  } catch {
     return new Response("Invalid token", { status: 401 });
   }
 

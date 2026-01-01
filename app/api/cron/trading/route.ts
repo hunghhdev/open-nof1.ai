@@ -27,13 +27,14 @@ export async function GET(request: NextRequest) {
       message: "Trading loop executed successfully",
       timestamp: new Date().toISOString(),
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
     console.error("[CRON] Trading loop failed:", error);
 
     return NextResponse.json(
       {
         success: false,
-        error: error.message || "Unknown error",
+        error: errorMessage,
         timestamp: new Date().toISOString(),
       },
       { status: 500 }

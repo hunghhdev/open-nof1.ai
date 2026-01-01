@@ -1,18 +1,81 @@
-import { generateObject } from "ai";
+import { generateText } from "ai";
 import { generateUserPrompt, tradingPrompt } from "./prompt";
 import { getCurrentMarketState } from "../trading/current-market-state";
 import { z } from "zod";
 import { deepseekR1, deepseekThinking } from "./model";
 import { getAccountInformationAndPerformance } from "../trading/account-information-and-performance";
 import { prisma } from "../prisma";
-import { Operation, Symbol } from "@prisma/client";
+import { Operation, Symbol, ExecutionStatus } from "@prisma/client";
 import { executeBuy, executeSell, updateStopLossTakeProfit } from "../trading/executor";
 
-const operationValues = Object.values(Operation) as [string, ...string[]];
+// Schema for AI response validation
+const tradingResponseSchema = z.object({
+  operation: z.enum(["Buy", "Sell", "Hold"]),
+  buy: z
+    .object({
+      pricing: z.number(),
+      amount: z.number(),
+      leverage: z.number().min(1).max(20),
+    })
+    .optional(),
+  sell: z
+    .object({
+      percentage: z.number().min(0).max(100),
+    })
+    .optional(),
+  adjustProfit: z
+    .object({
+      stopLoss: z.number().optional(),
+      takeProfit: z.number().optional(),
+    })
+    .optional(),
+  chat: z.string(),
+});
+
+type TradingResponse = z.infer<typeof tradingResponseSchema>;
+
+/**
+ * Extract JSON from AI response text
+ * Handles cases where JSON is wrapped in markdown code blocks
+ */
+function extractJSON(text: string): string {
+  // Try to find JSON in code blocks first
+  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    return codeBlockMatch[1].trim();
+  }
+
+  // Try to find raw JSON object
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    return jsonMatch[0];
+  }
+
+  return text;
+}
+
+/**
+ * Parse and validate AI response
+ */
+function parseAIResponse(text: string): TradingResponse | null {
+  try {
+    const jsonStr = extractJSON(text);
+    const parsed = JSON.parse(jsonStr);
+
+    // Clean up null values that should be undefined
+    if (parsed.buy === null) delete parsed.buy;
+    if (parsed.sell === null) delete parsed.sell;
+    if (parsed.adjustProfit === null) delete parsed.adjustProfit;
+
+    return tradingResponseSchema.parse(parsed);
+  } catch {
+    return null;
+  }
+}
 
 // Suppress AI SDK warnings - models work fine via tool calling despite warning
 if (typeof globalThis !== "undefined") {
-  (globalThis as any).AI_SDK_LOG_WARNINGS = false;
+  (globalThis as Record<string, unknown>).AI_SDK_LOG_WARNINGS = false;
 }
 
 /**
@@ -57,94 +120,57 @@ export async function run(initialCapital: number) {
         ? deepseekR1
         : deepseekThinking;
 
-      let object, reasoning;
+      let object: TradingResponse | null = null;
+      let reasoning = "";
 
       try {
-        const result = await generateObject({
+        const result = await generateText({
           model,
           system: tradingPrompt,
           prompt: userPrompt,
-          schema: z.object({
-            operation: z.enum(operationValues),
-            buy: z
-              .object({
-                pricing: z.number(),
-                amount: z.number(),
-                leverage: z.number().min(1).max(20),
-              })
-              .optional(),
-            sell: z
-              .object({
-                percentage: z.number().min(0).max(100),
-              })
-              .optional(),
-            adjustProfit: z
-              .object({
-                stopLoss: z.number().optional(),
-                takeProfit: z.number().optional(),
-              })
-              .optional(),
-            chat: z.string(),
-          }),
         });
 
-        object = result.object;
-        reasoning = result.reasoning;
-      } catch (aiError: any) {
-        // Detailed error logging for AI schema validation failures
+        // Handle reasoning - can be string, array, or object
+        if (typeof result.reasoning === "string") {
+          reasoning = result.reasoning;
+        } else if (Array.isArray(result.reasoning)) {
+          reasoning = result.reasoning
+            .map((r: unknown) => {
+              if (typeof r === "string") return r;
+              if (r && typeof r === "object" && "text" in r) return (r as { text: string }).text;
+              return JSON.stringify(r);
+            })
+            .join("\n");
+        } else if (result.reasoning) {
+          reasoning = JSON.stringify(result.reasoning);
+        }
+
+        // Parse JSON from the response text
+        object = parseAIResponse(result.text);
+
+        if (!object) {
+          throw new Error(`Failed to parse AI response: ${result.text.substring(0, 500)}`);
+        }
+      } catch (aiError: unknown) {
+        const errorMessage = aiError instanceof Error ? aiError.message : String(aiError);
+        // Detailed error logging for AI failures
         console.error(`\n${"=".repeat(80)}`);
-        console.error(`[AI ERROR] ❌ Schema validation failed for ${tradingPair}`);
+        console.error(`[AI ERROR] ❌ Failed for ${tradingPair}`);
         console.error(`${"=".repeat(80)}`);
-        console.error(`Error Type: ${aiError.constructor.name}`);
-        console.error(`Error Message: ${aiError.message}`);
-
-        // Log the raw error object
-        if (aiError.cause) {
-          console.error(`\n[AI ERROR] Error Cause:`, JSON.stringify(aiError.cause, null, 2));
-        }
-
-        // Log validation errors if available (Zod errors)
-        if (aiError.errors) {
-          console.error(`\n[AI ERROR] Validation Errors:`, JSON.stringify(aiError.errors, null, 2));
-        }
-
-        // Try to extract and log raw response if available
-        if (aiError.response) {
-          console.error(`\n[AI ERROR] Raw AI Response:`, JSON.stringify(aiError.response, null, 2));
-        }
-
-        if (aiError.data) {
-          console.error(`\n[AI ERROR] Response Data:`, JSON.stringify(aiError.data, null, 2));
-        }
-
-        // Log the expected schema structure
-        console.error(`\n[AI ERROR] Expected Schema Structure:`);
-        console.error(`{
-  operation: "Buy" | "Sell" | "Hold",
-  buy?: { pricing: number, amount: number, leverage: number (1-20) },
-  sell?: { percentage: number (0-100) },
-  adjustProfit?: { stopLoss?: number, takeProfit?: number },
-  chat: string
-}`);
-
-        console.error(`\n[AI ERROR] 📋 Action Items:`);
-        console.error(`  1. Check if AI model returned a valid response`);
-        console.error(`  2. Verify prompt is clear and not causing confusion`);
-        console.error(`  3. Check if model has rate limits or API issues`);
-        console.error(`  4. Consider adjusting prompt or schema if pattern repeats`);
+        console.error(`Error: ${errorMessage}`);
         console.error(`${"=".repeat(80)}\n`);
 
         // Save error to database for analysis
         await prisma.chat.create({
           data: {
-            reasoning: `AI_ERROR: ${aiError.message}`,
-            chat: `Schema validation failed for ${tradingPair}. Error: ${aiError.message}`,
+            reasoning: `AI_ERROR: ${errorMessage}`,
+            chat: `AI failed for ${tradingPair}. Error: ${errorMessage}`,
             userPrompt,
             trades: {
               create: {
                 symbol: symbolEnum,
                 operation: Operation.Hold,
-                status: "FAILED" as any,
+                status: "FAILED",
               },
             },
           },
@@ -303,7 +329,7 @@ export async function run(initialCapital: number) {
             await prisma.trade.update({
               where: { id: tradeRecord.id },
               data: {
-                status: "FILLED" as any,
+                status: ExecutionStatus.FILLED,
                 error: "No open position to update. Treated as Wait."
               },
             });
@@ -327,12 +353,13 @@ export async function run(initialCapital: number) {
           console.log(`[HOLD] No action needed for ${tradingPair}`);
           await prisma.trade.update({
             where: { id: tradeRecord.id },
-            data: { status: "FILLED" as any }, // Mark as processed
+            data: { status: ExecutionStatus.FILLED },
           });
         }
       }
-    } catch (error: any) {
-      console.error(`[ERROR] Failed to process ${tradingPair}:`, error.message);
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[ERROR] Failed to process ${tradingPair}:`, errMsg);
       // Continue with next symbol
       continue;
     }

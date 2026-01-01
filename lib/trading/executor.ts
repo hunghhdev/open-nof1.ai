@@ -7,7 +7,7 @@
 
 import { binance } from "./binance";
 import { prisma } from "../prisma";
-import { Operation, Symbol, ExecutionStatus, PositionStatus } from "@prisma/client";
+import { Symbol, ExecutionStatus, PositionStatus } from "@prisma/client";
 
 // DRY RUN MODE: If true, only log actions without executing on Binance
 const DRY_RUN = process.env.DRY_RUN === "true";
@@ -19,10 +19,17 @@ const DRY_RUN = process.env.DRY_RUN === "true";
 const SAFETY_LIMITS = {
   MAX_LEVERAGE: 20,
   MIN_LEVERAGE: 1,
-  MAX_POSITION_SIZE_PERCENTAGE: 0.6, // Max 60% of portfolio per position (adjusted for small accounts)
-  MIN_CASH_RESERVE: 0.2, // 20% cash reserve (adjusted for small accounts)
-  MAX_SLIPPAGE_PERCENTAGE: 0.02, // 2% max slippage from expected price
+  MAX_POSITION_SIZE_PERCENTAGE: 0.5, // Max 50% of portfolio per position
+  MIN_CASH_RESERVE: 0.25, // 25% cash reserve
+  MAX_SLIPPAGE_PERCENTAGE: 0.015, // 1.5% max slippage from expected price
   MIN_TRADE_AMOUNT_USDT: 10, // Minimum $10 trade (Binance requirement)
+  // New limits for profit optimization
+  MAX_PORTFOLIO_LEVERAGE: 5, // Total notional / equity
+  MAX_DAILY_LOSS_PERCENTAGE: 0.05, // 5% max daily loss
+  MAX_WEEKLY_LOSS_PERCENTAGE: 0.10, // 10% max weekly loss
+  MIN_RISK_REWARD_RATIO: 1.5, // Minimum R:R to accept trade
+  MAX_RISK_PERCENTAGE: 0.03, // 3% max risk per trade
+  LIQUIDATION_BUFFER: 0.15, // 15% buffer from liquidation price
 };
 
 // ============================================
@@ -182,6 +189,162 @@ function validateSLTP(
   return { valid: true };
 }
 
+/**
+ * Validate total portfolio leverage across all positions
+ */
+async function validatePortfolioLeverage(newPositionNotional: number): Promise<{ valid: boolean; error?: string }> {
+  const balance = await binance.fetchBalance({ type: "future" });
+  const equity = balance.USDT?.total || 0;
+
+  if (equity === 0) {
+    return { valid: false, error: "No equity available" };
+  }
+
+  const positions = await binance.fetchPositions();
+  const currentNotional = positions.reduce((sum, p) => sum + Math.abs(p.notional || 0), 0);
+
+  const totalNotional = currentNotional + newPositionNotional;
+  const portfolioLeverage = totalNotional / equity;
+
+  if (portfolioLeverage > SAFETY_LIMITS.MAX_PORTFOLIO_LEVERAGE) {
+    return {
+      valid: false,
+      error: `Portfolio leverage ${portfolioLeverage.toFixed(1)}x exceeds max ${SAFETY_LIMITS.MAX_PORTFOLIO_LEVERAGE}x`,
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Validate risk percentage based on stop loss distance
+ */
+function validateRiskPercentage(
+  equity: number,
+  entryPrice: number,
+  stopLoss: number | undefined,
+  amount: number,
+  leverage: number
+): { valid: boolean; actualRisk: number; error?: string } {
+  if (!stopLoss) {
+    return { valid: true, actualRisk: 0 }; // No SL means we can't calculate risk
+  }
+
+  const stopDistance = Math.abs(entryPrice - stopLoss);
+  const potentialLoss = stopDistance * amount * leverage;
+  const actualRisk = potentialLoss / equity;
+
+  if (actualRisk > SAFETY_LIMITS.MAX_RISK_PERCENTAGE) {
+    return {
+      valid: false,
+      actualRisk,
+      error: `Risk ${(actualRisk * 100).toFixed(1)}% exceeds max ${SAFETY_LIMITS.MAX_RISK_PERCENTAGE * 100}%`,
+    };
+  }
+  return { valid: true, actualRisk };
+}
+
+/**
+ * Validate risk/reward ratio
+ */
+function validateRiskRewardRatio(
+  entryPrice: number,
+  stopLoss?: number,
+  takeProfit?: number
+): { valid: boolean; ratio: number; error?: string } {
+  if (!stopLoss || !takeProfit) {
+    return { valid: true, ratio: 0 }; // Can't calculate without both
+  }
+
+  const risk = Math.abs(entryPrice - stopLoss);
+  const reward = Math.abs(takeProfit - entryPrice);
+  const ratio = reward / risk;
+
+  if (ratio < SAFETY_LIMITS.MIN_RISK_REWARD_RATIO) {
+    return {
+      valid: false,
+      ratio,
+      error: `Risk/Reward ratio ${ratio.toFixed(2)} below minimum ${SAFETY_LIMITS.MIN_RISK_REWARD_RATIO}`,
+    };
+  }
+  return { valid: true, ratio };
+}
+
+/**
+ * Calculate liquidation price and validate buffer
+ */
+function validateLiquidationBuffer(
+  entryPrice: number,
+  leverage: number,
+  stopLoss?: number
+): { liquidationPrice: number; buffer: number; valid: boolean; error?: string } {
+  // Simplified liquidation formula for LONG positions
+  // For LONG: Liq = Entry × (1 - 1/Leverage + maintenanceMargin)
+  const maintenanceMargin = 0.004; // 0.4% for most pairs
+  const liquidationPrice = entryPrice * (1 - (1 / leverage) + maintenanceMargin);
+
+  const bufferFromEntry = (entryPrice - liquidationPrice) / entryPrice;
+
+  // If SL is set, check it's above liquidation price
+  if (stopLoss && stopLoss <= liquidationPrice) {
+    return {
+      liquidationPrice,
+      buffer: bufferFromEntry,
+      valid: false,
+      error: `Stop-Loss $${stopLoss.toFixed(2)} is at or below liquidation price $${liquidationPrice.toFixed(2)}`,
+    };
+  }
+
+  if (bufferFromEntry < SAFETY_LIMITS.LIQUIDATION_BUFFER) {
+    return {
+      liquidationPrice,
+      buffer: bufferFromEntry,
+      valid: false,
+      error: `Liquidation buffer ${(bufferFromEntry * 100).toFixed(1)}% below minimum ${SAFETY_LIMITS.LIQUIDATION_BUFFER * 100}%`,
+    };
+  }
+
+  return { liquidationPrice, buffer: bufferFromEntry, valid: true };
+}
+
+/**
+ * Check daily and weekly loss limits
+ */
+async function checkLossLimits(equity: number): Promise<{ canTrade: boolean; reason?: string }> {
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfWeek = new Date(now);
+  startOfWeek.setDate(now.getDate() - now.getDay());
+  startOfWeek.setHours(0, 0, 0, 0);
+
+  const [dailyTrades, weeklyTrades] = await Promise.all([
+    prisma.position.findMany({
+      where: {
+        closedAt: { gte: startOfDay },
+        status: "CLOSED",
+      },
+    }),
+    prisma.position.findMany({
+      where: {
+        closedAt: { gte: startOfWeek },
+        status: "CLOSED",
+      },
+    }),
+  ]);
+
+  const dailyPnl = dailyTrades.reduce((sum, p) => sum + (p.realizedPnl || 0), 0);
+  const weeklyPnl = weeklyTrades.reduce((sum, p) => sum + (p.realizedPnl || 0), 0);
+
+  if (dailyPnl < -equity * SAFETY_LIMITS.MAX_DAILY_LOSS_PERCENTAGE) {
+    return { canTrade: false, reason: `Daily loss limit hit: $${dailyPnl.toFixed(2)} (max: -$${(equity * SAFETY_LIMITS.MAX_DAILY_LOSS_PERCENTAGE).toFixed(2)})` };
+  }
+
+  if (weeklyPnl < -equity * SAFETY_LIMITS.MAX_WEEKLY_LOSS_PERCENTAGE) {
+    return { canTrade: false, reason: `Weekly loss limit hit: $${weeklyPnl.toFixed(2)} (max: -$${(equity * SAFETY_LIMITS.MAX_WEEKLY_LOSS_PERCENTAGE).toFixed(2)})` };
+  }
+
+  return { canTrade: true };
+}
+
 // ============================================
 // EXECUTION FUNCTIONS
 // ============================================
@@ -293,8 +456,80 @@ export async function executeBuy(params: BuyParams): Promise<ExecutionResult> {
       return { success: false, error: sltpCheck.error };
     }
     console.log(`[EXECUTOR] ✓ Safety Guard 7 PASSED: SL/TP prices valid`);
-    console.log(`[EXECUTOR] ✅ All safety guards passed!`);
 
+    // Safety Guard 8: Check daily/weekly loss limits
+    const balance = await binance.fetchBalance({ type: "future" });
+    const equity = balance.USDT?.total || 0;
+    console.log(`[EXECUTOR] → Safety Guard 8: Checking daily/weekly loss limits`);
+    const lossLimitCheck = await checkLossLimits(equity);
+    if (!lossLimitCheck.canTrade) {
+      console.log(`[EXECUTOR] ❌ Safety Guard 8 FAILED: ${lossLimitCheck.reason}`);
+      await prisma.trade.update({
+        where: { id: tradeId },
+        data: { status: ExecutionStatus.FAILED, error: lossLimitCheck.reason },
+      });
+      return { success: false, error: lossLimitCheck.reason };
+    }
+    console.log(`[EXECUTOR] ✓ Safety Guard 8 PASSED: Loss limits OK`);
+
+    // Safety Guard 9: Validate portfolio leverage
+    const positionNotional = amount * currentPrice;
+    console.log(`[EXECUTOR] → Safety Guard 9: Validating portfolio leverage`);
+    const portfolioLeverageCheck = await validatePortfolioLeverage(positionNotional);
+    if (!portfolioLeverageCheck.valid) {
+      console.log(`[EXECUTOR] ❌ Safety Guard 9 FAILED: ${portfolioLeverageCheck.error}`);
+      await prisma.trade.update({
+        where: { id: tradeId },
+        data: { status: ExecutionStatus.FAILED, error: portfolioLeverageCheck.error },
+      });
+      return { success: false, error: portfolioLeverageCheck.error };
+    }
+    console.log(`[EXECUTOR] ✓ Safety Guard 9 PASSED: Portfolio leverage OK`);
+
+    // Safety Guard 10: Validate risk percentage
+    console.log(`[EXECUTOR] → Safety Guard 10: Validating risk percentage`);
+    const riskCheck = validateRiskPercentage(equity, currentPrice, stopLoss, amount, leverage);
+    if (!riskCheck.valid) {
+      console.log(`[EXECUTOR] ❌ Safety Guard 10 FAILED: ${riskCheck.error}`);
+      await prisma.trade.update({
+        where: { id: tradeId },
+        data: { status: ExecutionStatus.FAILED, error: riskCheck.error },
+      });
+      return { success: false, error: riskCheck.error };
+    }
+    console.log(`[EXECUTOR] ✓ Safety Guard 10 PASSED: Risk ${(riskCheck.actualRisk * 100).toFixed(1)}%`);
+
+    // Safety Guard 11: Validate risk/reward ratio
+    console.log(`[EXECUTOR] → Safety Guard 11: Validating risk/reward ratio`);
+    const rrCheck = validateRiskRewardRatio(currentPrice, stopLoss, takeProfit);
+    if (!rrCheck.valid) {
+      console.log(`[EXECUTOR] ❌ Safety Guard 11 FAILED: ${rrCheck.error}`);
+      await prisma.trade.update({
+        where: { id: tradeId },
+        data: { status: ExecutionStatus.FAILED, error: rrCheck.error },
+      });
+      return { success: false, error: rrCheck.error };
+    }
+    if (rrCheck.ratio > 0) {
+      console.log(`[EXECUTOR] ✓ Safety Guard 11 PASSED: R:R ratio ${rrCheck.ratio.toFixed(2)}`);
+    } else {
+      console.log(`[EXECUTOR] ⚠ Safety Guard 11 SKIPPED: No SL/TP provided`);
+    }
+
+    // Safety Guard 12: Validate liquidation buffer
+    console.log(`[EXECUTOR] → Safety Guard 12: Validating liquidation buffer`);
+    const liqCheck = validateLiquidationBuffer(currentPrice, leverage, stopLoss);
+    if (!liqCheck.valid) {
+      console.log(`[EXECUTOR] ❌ Safety Guard 12 FAILED: ${liqCheck.error}`);
+      await prisma.trade.update({
+        where: { id: tradeId },
+        data: { status: ExecutionStatus.FAILED, error: liqCheck.error },
+      });
+      return { success: false, error: liqCheck.error };
+    }
+    console.log(`[EXECUTOR] ✓ Safety Guard 12 PASSED: Liquidation price $${liqCheck.liquidationPrice.toFixed(2)}, buffer ${(liqCheck.buffer * 100).toFixed(1)}%`);
+
+    console.log(`[EXECUTOR] ✅ All 12 safety guards passed!`);
 
     // DRY RUN: Simulate execution
     if (DRY_RUN) {
@@ -410,18 +645,19 @@ export async function executeBuy(params: BuyParams): Promise<ExecutionResult> {
       executedPrice: order.average,
       executedAmount: order.filled,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
     console.error(`[EXECUTOR] Buy failed:`, error);
 
     await prisma.trade.update({
       where: { id: tradeId },
       data: {
         status: ExecutionStatus.FAILED,
-        error: error.message || "Unknown error",
+        error: errorMessage,
       },
     });
 
-    return { success: false, error: error.message };
+    return { success: false, error: errorMessage };
   }
 }
 
@@ -466,9 +702,18 @@ export async function executeSell(params: SellParams): Promise<ExecutionResult> 
     const amountToSell = (position.entryAmount * percentage) / 100;
     console.log(`[EXECUTOR] → Calculated sell amount: ${amountToSell} ${symbol} (${percentage}%)`);
 
+    // Check if this is a partial sell
+    const isPartialSell = percentage < 100;
+    const remainingAmount = position.entryAmount - amountToSell;
+
+    console.log(`[EXECUTOR] → Sell type: ${isPartialSell ? "PARTIAL" : "FULL"} (${percentage}%)`);
+    if (isPartialSell) {
+      console.log(`[EXECUTOR] → Remaining amount after sell: ${remainingAmount} ${symbol}`);
+    }
+
     // DRY RUN: Simulate execution
     if (DRY_RUN) {
-      console.log(`[EXECUTOR] 🧪 DRY_RUN MODE: Simulating SELL execution`);
+      console.log(`[EXECUTOR] 🧪 DRY_RUN MODE: Simulating ${isPartialSell ? "PARTIAL" : "FULL"} SELL execution`);
       const currentPrice = (await binance.fetchTicker(symbolToPair(symbol))).last!;
       const simulatedOrder = {
         id: `DRY_RUN_${Date.now()}`,
@@ -476,30 +721,45 @@ export async function executeSell(params: SellParams): Promise<ExecutionResult> 
         filled: amountToSell,
       };
 
-      const realizedPnl =
+      const partialPnl =
         (simulatedOrder.average - position.entryPrice) *
         simulatedOrder.filled *
         position.entryLeverage;
 
-      console.log(`[DRY_RUN] 🔴 Would execute SELL:`, {
+      console.log(`[DRY_RUN] 🔴 Would execute ${isPartialSell ? "PARTIAL" : "FULL"} SELL:`, {
         symbol,
         amount: amountToSell,
+        percentage,
         estimatedPrice: currentPrice,
-        estimatedPnL: `${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)}`,
+        estimatedPnL: `${partialPnl >= 0 ? "+" : ""}$${partialPnl.toFixed(2)}`,
+        remainingAmount: isPartialSell ? remainingAmount : 0,
       });
 
-      await prisma.position.update({
-        where: { id: position.id },
-        data: {
-          status: PositionStatus.CLOSED,
-          exitPrice: simulatedOrder.average,
-          exitAmount: simulatedOrder.filled,
-          exitOrderId: simulatedOrder.id,
-          exitReason: "MANUAL",
-          realizedPnl,
-          closedAt: new Date(),
-        },
-      });
+      if (isPartialSell) {
+        // PARTIAL SELL: Update position with remaining amount
+        await prisma.position.update({
+          where: { id: position.id },
+          data: {
+            entryAmount: remainingAmount,
+            realizedPnl: (position.realizedPnl || 0) + partialPnl,
+          },
+        });
+        console.log(`[EXECUTOR] → Position updated: ${remainingAmount} ${symbol} remaining, +$${partialPnl.toFixed(2)} realized`);
+      } else {
+        // FULL SELL: Close position
+        await prisma.position.update({
+          where: { id: position.id },
+          data: {
+            status: PositionStatus.CLOSED,
+            exitPrice: simulatedOrder.average,
+            exitAmount: simulatedOrder.filled,
+            exitOrderId: simulatedOrder.id,
+            exitReason: "MANUAL",
+            realizedPnl: (position.realizedPnl || 0) + partialPnl,
+            closedAt: new Date(),
+          },
+        });
+      }
 
       await prisma.trade.update({
         where: { id: tradeId },
@@ -531,32 +791,49 @@ export async function executeSell(params: SellParams): Promise<ExecutionResult> 
       { reduceOnly: true }
     );
 
-    console.log(`[EXECUTOR] ✅ Sell order created:`, {
+    console.log(`[EXECUTOR] ✅ ${isPartialSell ? "Partial" : "Full"} sell order created:`, {
       symbol,
       orderId: order.id,
       price: order.average,
       amount: order.filled,
+      percentage,
     });
 
-    // Calculate P&L
-    const realizedPnl =
+    // Calculate P&L for this sell
+    const partialPnl =
       (order.average! - position.entryPrice) *
       order.filled! *
       position.entryLeverage;
 
-    // Close position
-    await prisma.position.update({
-      where: { id: position.id },
-      data: {
-        status: PositionStatus.CLOSED,
-        exitPrice: order.average,
-        exitAmount: order.filled,
-        exitOrderId: order.id,
-        exitReason: "MANUAL",
-        realizedPnl,
-        closedAt: new Date(),
-      },
-    });
+    if (isPartialSell) {
+      // PARTIAL SELL: Update position with remaining amount
+      await prisma.position.update({
+        where: { id: position.id },
+        data: {
+          entryAmount: remainingAmount,
+          realizedPnl: (position.realizedPnl || 0) + partialPnl,
+        },
+      });
+
+      console.log(`[EXECUTOR] → Position updated after partial sell:`, {
+        remainingAmount,
+        totalRealizedPnl: (position.realizedPnl || 0) + partialPnl,
+      });
+    } else {
+      // FULL SELL: Close position
+      await prisma.position.update({
+        where: { id: position.id },
+        data: {
+          status: PositionStatus.CLOSED,
+          exitPrice: order.average,
+          exitAmount: order.filled,
+          exitOrderId: order.id,
+          exitReason: "MANUAL",
+          realizedPnl: (position.realizedPnl || 0) + partialPnl,
+          closedAt: new Date(),
+        },
+      });
+    }
 
     // Update trade
     await prisma.trade.update({
@@ -577,18 +854,19 @@ export async function executeSell(params: SellParams): Promise<ExecutionResult> 
       executedPrice: order.average,
       executedAmount: order.filled,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
     console.error(`[EXECUTOR] Sell failed:`, error);
 
     await prisma.trade.update({
       where: { id: tradeId },
       data: {
         status: ExecutionStatus.FAILED,
-        error: error.message || "Unknown error",
+        error: errorMessage,
       },
     });
 
-    return { success: false, error: error.message };
+    return { success: false, error: errorMessage };
   }
 }
 
@@ -688,18 +966,19 @@ export async function updateStopLossTakeProfit(
     });
 
     return { success: true };
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
     console.error(`[EXECUTOR] Update SL/TP failed:`, error);
 
     await prisma.trade.update({
       where: { id: tradeId },
       data: {
         status: ExecutionStatus.FAILED,
-        error: error.message || "Unknown error",
+        error: errorMessage,
       },
     });
 
-    return { success: false, error: error.message };
+    return { success: false, error: errorMessage };
   }
 }
 

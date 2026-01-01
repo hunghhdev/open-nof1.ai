@@ -202,7 +202,7 @@ async function testAIFlow() {
       acc[pos.symbol] = (acc[pos.symbol] || 0) + 1;
       return acc;
     }, {} as Record<string, number>);
-    const duplicates = Object.entries(symbolCounts).filter(([_, count]) => count > 1);
+    const duplicates = Object.entries(symbolCounts).filter(([, count]) => count > 1);
     if (duplicates.length === 0) {
       console.log("✅ No duplicate open positions (KISS rule enforced)");
       validationsPassed++;
@@ -215,8 +215,9 @@ async function testAIFlow() {
     console.log(`📊 Validations: ${validationsPassed} passed, ${validationsFailed} failed`);
     console.log("");
 
-  } catch (error: any) {
-    console.error("❌ Test failed:", error.message);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("❌ Test failed:", errorMessage);
     console.error(error);
     process.exit(1);
   } finally {

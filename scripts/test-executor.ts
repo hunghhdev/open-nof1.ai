@@ -310,8 +310,9 @@ async function runTests() {
     console.log(`- Closed positions: ${closedPositions}`);
     console.log("");
 
-  } catch (error: any) {
-    console.error("❌ Test failed:", error.message);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("❌ Test failed:", errorMessage);
     console.error(error);
     process.exit(1);
   } finally {
